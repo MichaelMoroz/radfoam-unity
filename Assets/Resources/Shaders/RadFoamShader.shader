@@ -46,12 +46,6 @@ Shader "Custom/RadFoamShader"
                 UNITY_VERTEX_OUTPUT_STEREO
 			};
 
-            struct Ray
-            {
-                float3 origin;
-                float3 direction;
-            };
-
             UNITY_DECLARE_DEPTH_TEXTURE(_CameraDepthTexture);
 
             Texture2D<float4> _attr_tex;
@@ -239,6 +233,60 @@ Shader "Custom/RadFoamShader"
                 o.start = FindNearestCell(mul(unity_WorldToObject, float4(_WorldSpaceCameraPos, 1)).xyz, 123);
                 return o;
             }
+            
+            struct Ray
+            {
+                float3 origin;
+                float3 direction;
+                float3 color;
+            
+                float t_0;
+                float t_max;
+                float transmittance;
+                uint cell; // current cell index    
+            };
+
+            void TraceFoamRay(inout Ray ray)
+            {
+                int i = 0;
+                for (; i < 192; i++) {
+                    float4 cell_data = positions_buff(ray.cell);
+                    uint adj_from = ray.cell > 0 ? asuint(positions_buff(ray.cell - 1).w) : 0;
+                    uint adj_to = asuint(cell_data.w);
+
+                    float t_1 = 1e10f;
+                    uint next_face = -1; 
+
+                    float3 cell_offset = cell_data.xyz - ray.origin;
+                    for (uint f = adj_from; f < adj_to; f++) {
+                        float3 diff = unpackfloat3(adjacency_diff_buffer(f));
+                        float denom = dot(diff, ray.direction);
+                        float3 mid = diff * (0.5 + MID_ESP) + cell_offset;
+                        float t = dot(mid, diff) / denom;
+                        if(denom > 0 && t < t_1) {
+                            t_1 = t;
+                            next_face = f;
+                        }
+                    }
+
+                    t_1 = min(t_1, ray.t_max);
+        
+                    float4 attrs = attrs_buff(ray.cell);
+                    float density = attrs.w;
+                    float alpha = 1.0 - exp(-density * (t_1 - ray.t_0));
+                    float weight = ray.transmittance * alpha;
+
+                    ray.color = ray.color + attrs.rgb * weight;
+                    ray.transmittance = ray.transmittance - weight;
+
+                    if (next_face == -1 || t_1 >= ray.t_max || ray.transmittance < _TransmittanceThreshold) {
+                        break;
+                    }
+
+                    ray.cell = adjacency_buffer(next_face);
+                    ray.t_0 = t_1;
+                }
+            }
 
             #define CHUNK_SIZE 4
             float4 frag(v2f input) : SV_Target
@@ -266,10 +314,6 @@ Shader "Custom/RadFoamShader"
                 rayPos = mul(unity_WorldToObject, float4(rayPos, 1)).xyz;
                 rayDir = normalize(mul(unity_WorldToObject, float4(rayDir, 0)).xyz);
                 worldPos = mul(unity_WorldToObject, float4(worldPos, 1)).xyz;
-                
-                Ray ray;
-                ray.origin = rayPos;
-                ray.direction = rayDir;
 
                 float t_0 = 0.0f;
                 float t_max = dot(worldPos - rayPos, rayDir);
@@ -284,63 +328,31 @@ Shader "Custom/RadFoamShader"
                     return float4(0, 0, 0, 0); // No intersection with the volume
                 }
 
-                uint enc_diffs[CHUNK_SIZE];
-
                 // tracing state
                 uint cell = input.start;
 
                 if(t.x > 0) { // Find new starting point if outside the bounding box
-                    float3 start_pos = ray.origin + ray.direction * t_0;
+                    float3 start_pos = rayPos + rayDir * t_0;
                     cell = FindNearestCell(start_pos, cell);
                 }
 
-                float transmittance = 1.0f;
-                float3 color = float3(0, 0, 0);
+                
+                Ray ray;
+                ray.origin = rayPos;
+                ray.direction = rayDir;
+                ray.color = float3(0, 0, 0);
+                ray.t_0 = t_0;
+                ray.t_max = t_max;
+                ray.transmittance = 1.0f;
+                ray.cell = cell;
 
-                int i = 0;
-                for (; i < 192; i++) {
-                    float4 cell_data = positions_buff(cell);
-                    uint adj_from = cell > 0 ? asuint(positions_buff(cell - 1).w) : 0;
-                    uint adj_to = asuint(cell_data.w);
-
-                    float t_1 = 1e10f;
-                    uint next_face = -1; 
-
-                    float3 cell_offset = cell_data.xyz - ray.origin;
-                    for (uint f = adj_from; f < adj_to; f++) {
-                        float3 diff = unpackfloat3(adjacency_diff_buffer(f));
-                        float denom = dot(diff, ray.direction);
-                        float3 mid = diff * (0.5 + MID_ESP) + cell_offset;
-                        float t = dot(mid, diff) / denom;
-                        if(denom > 0 && t < t_1) {
-                            t_1 = t;
-                            next_face = f;
-                        }
-                    }
-
-                    t_1 = min(t_1, t_max);
-        
-                    float4 attrs = attrs_buff(cell);
-                    float density = attrs.w;
-                    float alpha = 1.0 - exp(-density * (t_1 - t_0));
-                    float weight = transmittance * alpha;
-
-                    color += attrs.rgb * weight;
-                    transmittance = transmittance * (1.0 - alpha);
-
-                    if (next_face == -1 || t_1 >= t_max || transmittance < _TransmittanceThreshold) {
-                        break;
-                    }
-
-                    cell = adjacency_buffer(next_face);
-                    t_0 = t_1;
-                }
+                TraceFoamRay(ray);
 
                 //color = i / 200.0;
                 //transmittance = 0.0;
-                color = pow(color, 2.2f); // Fix color
-                if (transmittance <= _TransmittanceThreshold) transmittance = 0.0;
-                return float4(color, 1.0f - transmittance);
+                ray.color = pow(ray.color, 2.2f); // Fix color
+                if (ray.transmittance <= _TransmittanceThreshold) ray.transmittance = 0.0;
+                return float4(ray.color, 1.0f - ray.transmittance);
             }
             ENDCG
         }
