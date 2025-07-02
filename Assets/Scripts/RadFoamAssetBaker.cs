@@ -30,6 +30,19 @@ public class RadFoamAssetBaker : MonoBehaviour
     public Texture2D adjacencyDiffTex;
     public Material  bakedMaterial;
 
+    static uint PackFloat3(float3 v)
+    {
+        float maxv = math.max(math.abs(v.x), math.max(math.abs(v.y), math.abs(v.z)));
+        // avoid log2(0) → -∞
+        float log2v = maxv > 0f ? math.log2(maxv) : -15f;
+        int   e     = (int)math.clamp(math.ceil(log2v), -15f, 15f);
+
+        float scale = math.exp2(-e);
+        uint3 sv = (uint3)math.round(math.clamp(v * scale, -1f, 1f) * 255f + 255f);
+
+        return (uint)(e + 15) | (sv.x << 5) | (sv.y << 14) | (sv.z << 23);
+    }
+
 #if UNITY_EDITOR
     [ContextMenu("Bake RadFoam Assets")]
     void Bake()
@@ -135,12 +148,16 @@ public class RadFoamAssetBaker : MonoBehaviour
         adjacencyTex.SetPixelData(adj, 0, 0);
         adjacencyTex.Apply(false, true);
 
-        // ───────────────────── adjacency‑vector diff ─────────────────────
-        using var adjDiff = new NativeArray<half4>(aSize, Allocator.TempJob);
-        new BuildAdjDiff { positions = points, adjacency = adj, adjacency_diff = adjDiff }
-            .Schedule(vCount, 512).Complete();
+        // ───────────────────── adjacency-vector diff (packed) ─────────────────────
+        using var adjDiff = new NativeArray<float>(aSize, Allocator.TempJob);
 
-        adjacencyDiffTex = new Texture2D(texWidth, aHeight, TextureFormat.RGBAHalf, 0, true, true) {
+        new BuildAdjDiffPacked {
+            positions      = points,
+            adjacency      = adj,
+            adjacency_diff = adjDiff
+        }.Schedule(vCount, 512).Complete();
+
+        adjacencyDiffTex = new Texture2D(texWidth, aHeight, TextureFormat.RFloat, 0, true, true) {
             filterMode = FilterMode.Point,
             name       = "RadFoam_AdjDiff"
         };
@@ -192,21 +209,25 @@ public class RadFoamAssetBaker : MonoBehaviour
     }
 
     [BurstCompile]
-    struct BuildAdjDiff : IJobParallelFor
+    struct BuildAdjDiffPacked : IJobParallelFor
     {
-        [ReadOnly] public NativeArray<float4> positions;
-        [ReadOnly] public NativeArray<uint> adjacency;
-        [WriteOnly, NativeDisableParallelForRestriction] public NativeArray<half4> adjacency_diff;
+        [ReadOnly] public NativeArray<float4> positions;   // xyz = pos, w = adj offset (u32 bits)
+        [ReadOnly] public NativeArray<uint>   adjacency;   // compact indices
+        [WriteOnly, NativeDisableParallelForRestriction]
+        public NativeArray<float>             adjacency_diff; // R32F expects float
 
         public void Execute(int i)
         {
-            float4 p = positions[i];
+            float3 p = positions[i].xyz;
+
             int first = i > 0 ? (int)math.asuint(positions[i - 1].w) : 0;
-            int last  = (int)math.asuint(p.w);
+            int last  =          (int)math.asuint(positions[i].w);
+
             for (int a = first; a < last; a++)
             {
-                var diff = positions[(int)adjacency[a]].xyz - p.xyz;
-                adjacency_diff[a] = math.half4(new float4(diff, 0f));
+                float3 diff   = positions[(int)adjacency[a]].xyz - p;
+                uint   packed = PackFloat3(diff);
+                adjacency_diff[a] = math.asfloat(packed);   // bit-cast
             }
         }
     }

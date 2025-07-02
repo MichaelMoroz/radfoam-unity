@@ -7,10 +7,10 @@ Shader "Custom/RadFoamShader"
         _adjacency_diff_tex ("Adjacency Diff Texture", 2D) = "white" {}
         _adjacency_tex ("Adjacency Texture", 2D) = "white" {}
 
-        _TransmittanceThreshold ("Transmittance Threshold", Range(0, 1)) = 0.05
+        _TransmittanceThreshold ("Transmittance Threshold", Range(0, 1)) = 0.1
 
         _BBoxPos ("Bounding Box Position", Vector) = (0, 0, 0, 0)
-        _BBoxSize ("Bounding Box Size", Vector) = (1, 1, 1, 0)
+        _BBoxSize ("Bounding Box Size", Vector) = (15, 15, 15, 0)
         _BBoxRotation ("Bounding Box Rotation", Vector) = (0, 0, 0, 1)
     }
     SubShader
@@ -57,7 +57,7 @@ Shader "Custom/RadFoamShader"
             Texture2D<float4> _attr_tex;
             Texture2D<float4> _positions_tex;
 
-            Texture2D<float4> _adjacency_diff_tex; 
+            Texture2D<float> _adjacency_diff_tex; 
             Texture2D<float> _adjacency_tex;
 
             float _TransmittanceThreshold;
@@ -65,8 +65,18 @@ Shader "Custom/RadFoamShader"
             float4 _BBoxSize;
             float4 _BBoxRotation;
             
-            #define WIDTH_BITS 12
-            #define WIDTH 4096
+            #define WIDTH_BITS 13
+            #define WIDTH 8192
+
+            #define MID_ESP 0.005f
+
+            float3 unpackfloat3(uint data)
+            {
+                float scale = exp2(float(data & 0x1Fu) - 23.0);
+                float3 sv = float3((data >> 5) & 0x1FFu, (data >> 14) & 0x1FFu, data >> 23);
+                float offset = 255.0 * scale;
+                return scale * sv - offset;
+            }
 
             uint2 index_to_tex_buffer(uint i) {
                 return uint2(i & (WIDTH - 1), i >> WIDTH_BITS);
@@ -84,8 +94,8 @@ Shader "Custom/RadFoamShader"
                 return asuint(_adjacency_tex[index_to_tex_buffer(i)]);
             }
 
-            float3 adjacency_diff_buffer(uint i) {
-                return _adjacency_diff_tex[index_to_tex_buffer(i)].xyz;
+            uint adjacency_diff_buffer(uint i) {
+                return asuint(_adjacency_diff_tex[index_to_tex_buffer(i)]);
             }
 
             float4 SVPositionToClipPos(float4 pos)
@@ -149,11 +159,11 @@ Shader "Custom/RadFoamShader"
                     float4 cell_data = positions_buff(cell);
                     float3 cell_pos = cell_data.xyz;
 
-                    uint next_face = 0xFFFFFFFF; 
+                    uint next_face = -1; 
                     uint adj_from = cell > 0 ? asuint(positions_buff(cell - 1).w) : 0;
                     uint adj_to = asuint(cell_data.w);
                     for (uint f = adj_from; f < adj_to; f++) {
-                        half3 diff = adjacency_diff_buffer(f).xyz;
+                        float3 diff = unpackfloat3(adjacency_diff_buffer(f));
                         float3 adj_pos = cell_pos + diff;
                         float dist = distance(pos, adj_pos);
                         if(dist < closest_distance)
@@ -163,7 +173,7 @@ Shader "Custom/RadFoamShader"
                         }
                     }
 
-                    if (next_face == 0xFFFFFFFF) {
+                    if (next_face == -1) {
                         break;
                     }
 
@@ -230,7 +240,7 @@ Shader "Custom/RadFoamShader"
                 return o;
             }
 
-            #define CHUNK_SIZE 6
+            #define CHUNK_SIZE 4
             float4 frag(v2f input) : SV_Target
             {
                 UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
@@ -274,7 +284,7 @@ Shader "Custom/RadFoamShader"
                     return float4(0, 0, 0, 0); // No intersection with the volume
                 }
 
-                float3 diffs[CHUNK_SIZE];
+                uint enc_diffs[CHUNK_SIZE];
 
                 // tracing state
                 uint cell = input.start;
@@ -288,38 +298,29 @@ Shader "Custom/RadFoamShader"
                 float3 color = float3(0, 0, 0);
 
                 int i = 0;
-                for (; i < 200 && transmittance > _TransmittanceThreshold; i++) {
+                for (; i < 192; i++) {
                     float4 cell_data = positions_buff(cell);
                     uint adj_from = cell > 0 ? asuint(positions_buff(cell - 1).w) : 0;
                     uint adj_to = asuint(cell_data.w);
 
-                    float4 attrs = attrs_buff(cell);
-
                     float t_1 = 1e10f;
-                    uint next_face = 0xFFFFFFFF; 
+                    uint next_face = -1; 
 
-                    uint faces = adj_to - adj_from;
-                    for (uint f = 0; f < faces; f += CHUNK_SIZE) {
-
-                        [unroll(CHUNK_SIZE)]
-                        for (uint a1 = 0; a1 < CHUNK_SIZE; a1++) {
-                            diffs[a1] = adjacency_diff_buffer(adj_from + f + a1).xyz;
-                        }
-
-                        [unroll(CHUNK_SIZE)]
-                        for (uint a2 = 0; a2 < CHUNK_SIZE; a2++) {
-                            half3 diff = diffs[a2];
-                            float denom = dot(diff, ray.direction);
-                            float3 mid = cell_data.xyz + diff * 0.5f;
-                            float t = dot(mid - ray.origin, diff) / denom;
-                            bool valid = denom > 0 && t < t_1 && t > t_0 && f + a2 < faces;
-                            t_1 = valid ? t : t_1;
-                            next_face = valid ? adj_from + f + a2 : next_face;
+                    float3 cell_offset = cell_data.xyz - ray.origin;
+                    for (uint f = adj_from; f < adj_to; f++) {
+                        float3 diff = unpackfloat3(adjacency_diff_buffer(f));
+                        float denom = dot(diff, ray.direction);
+                        float3 mid = diff * (0.5 + MID_ESP) + cell_offset;
+                        float t = dot(mid, diff) / denom;
+                        if(denom > 0 && t < t_1) {
+                            t_1 = t;
+                            next_face = f;
                         }
                     }
 
                     t_1 = min(t_1, t_max);
-
+        
+                    float4 attrs = attrs_buff(cell);
                     float density = attrs.w;
                     float alpha = 1.0 - exp(-density * (t_1 - t_0));
                     float weight = transmittance * alpha;
@@ -327,7 +328,7 @@ Shader "Custom/RadFoamShader"
                     color += attrs.rgb * weight;
                     transmittance = transmittance * (1.0 - alpha);
 
-                    if (next_face == 0xFFFFFFFF || t_1 >= t_max) {
+                    if (next_face == -1 || t_1 >= t_max || transmittance < _TransmittanceThreshold) {
                         break;
                     }
 
