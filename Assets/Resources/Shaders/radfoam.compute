@@ -213,22 +213,14 @@ void RadFoam (uint3 id : SV_DispatchThreadID, uint group_index : SV_GroupIndex)
 
         uint faces = adj_to - adj_from;
 
-        half3 diffs[CHUNK_SIZE];
-        for (uint f = 0; f < faces; f += CHUNK_SIZE) {
-            [unroll(CHUNK_SIZE)]
-            for (uint a1 = 0; a1 < CHUNK_SIZE; a1++) {
-                diffs[a1] = (half3)_adjacency_diff[adj_from + f + a1].xyz;
-            }
-            [loop]
-            for (uint a2 = 0; a2 < CHUNK_SIZE; a2++) {
-                half3 diff = diffs[a2];
-                float denom = dot(diff, ray.direction);
-                float3 mid = cell_data.xyz + diff * 0.5f;
-                float t = dot(mid - ray.origin, diff) / denom;
-                bool valid = denom > 0 && t < t_1 && f + a2 < faces;
-                t_1 = valid ? t : t_1;
-                next_face = valid ? adj_from + f + a2 : next_face;
-            }
+        for (uint f = 0; f < faces; f += 1) {
+            half3 diff = (half3)_adjacency_diff[adj_from + f].xyz;
+            float denom = dot(diff, ray.direction);
+            float3 mid = cell_data.xyz + diff * 0.5f;
+            float t = dot(mid - ray.origin, diff) / denom;
+            bool valid = denom > 0 && t < t_1 && f < faces;
+            t_1 = valid ? t : t_1;
+            next_face = valid ? adj_from + f : next_face;
         }
  
         Attr attrs = _shs[cell];

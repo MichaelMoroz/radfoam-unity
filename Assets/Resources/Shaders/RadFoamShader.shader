@@ -49,14 +49,11 @@ Shader "Hidden/Custom/RadFoamShader"
             float4x4 _InverseProjectionMatrix;
             uint _start_index;
 
-            sampler2D _attr_tex;
-            sampler2D _positions_tex;
-            float4 _positions_tex_TexelSize;
+            Texture2D<float4> _attr_tex;
+            Texture2D<float4> _positions_tex;
 
-            sampler2D _adjacency_diff_tex; 
-            sampler2D _adjacency_tex;
-            float4 _adjacency_tex_TexelSize;
-
+            Texture2D<float4> _adjacency_diff_tex; 
+            Texture2D<float> _adjacency_tex;
 
             blit_v2f blitvert(blit_data v)
             {
@@ -86,29 +83,30 @@ Shader "Hidden/Custom/RadFoamShader"
                 return o;
             }
 
-            float2 index_to_tex_buffer(uint i, float2 texel_size, uint width) {
-                uint y = i / width;
-                uint x = i % width;
-                return float2((x + 0.5) * texel_size.x, (y + 0.5) * texel_size.y);
+            #define WIDTH_BITS 12
+            #define WIDTH 4096
+
+            uint2 index_to_tex_buffer(uint i) {
+                return uint2(i & (WIDTH - 1), i >> WIDTH_BITS);
             }
 
             float4 positions_buff(uint i) {
-                return tex2Dlod(_positions_tex, float4(index_to_tex_buffer(i, _positions_tex_TexelSize.xy, 4096), 0, 0));
+                return _positions_tex[index_to_tex_buffer(i)];
             }
 
             float4 attrs_buff(uint i) {
-                return tex2Dlod(_attr_tex, float4(index_to_tex_buffer(i, _positions_tex_TexelSize.xy, 4096), 0, 0));
+                return _attr_tex[index_to_tex_buffer(i)];
             }
 
             uint adjacency_buffer(uint i) {
-                return asuint(tex2Dlod(_adjacency_tex, float4(index_to_tex_buffer(i, _adjacency_tex_TexelSize.xy, 4096), 0, 0)).x);
+                return asuint(_adjacency_tex[index_to_tex_buffer(i)]);
             }
 
             float3 adjacency_diff_buffer(uint i) {
-                return tex2Dlod(_adjacency_diff_tex, float4(index_to_tex_buffer(i, _adjacency_tex_TexelSize.xy, 4096), 0, 0)).xyz;
+                return _adjacency_diff_tex[index_to_tex_buffer(i)].xyz;
             }
 
-            #define CHUNK_SIZE 6
+            #define CHUNK_SIZE 5
 
             fixed4 frag (blit_v2f input) : SV_Target
             {
@@ -148,7 +146,7 @@ Shader "Hidden/Custom/RadFoamShader"
                             diffs[a1] = adjacency_diff_buffer(adj_from + f + a1).xyz;
                         }
 
-                        [loop]
+                        [unroll(CHUNK_SIZE)]
                         for (uint a2 = 0; a2 < CHUNK_SIZE; a2++) {
                             half3 diff = diffs[a2];
                             float denom = dot(diff, ray.direction);
@@ -175,6 +173,7 @@ Shader "Hidden/Custom/RadFoamShader"
                     t_0 = t_1;
                 }
 
+                color = pow(color, 2.2f); // Fix color
                 return float4(lerp(color, src_color.xyz, transmittance), 1);
             }
             ENDCG

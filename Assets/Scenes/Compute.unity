@@ -244,14 +244,10 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: d4abcaa2fb1ba6b449fea72a664ee3d5, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  fisheye_fov: 90
   Target: {fileID: 617752957}
   DataList:
-  - {fileID: -4966213957662602761, guid: cf1c09065f469df45b925872db54e16f, type: 3}
-  - {fileID: -4966213957662602761, guid: d45be6f226f6a6f41817ec36b8d6bb2e, type: 3}
-  - {fileID: -4966213957662602761, guid: afe89d1b169d2b845a755df59c57dca5, type: 3}
-  - {fileID: -4966213957662602761, guid: bfef824799b690c448918902730ba3e2, type: 3}
-  - {fileID: -4966213957662602761, guid: 9cd030b0103d62a4da359ce4ba7419ba, type: 3}
+  - {fileID: -4966213957662602761, guid: 1019f1a33b9106b4abbd21b428c1b05d, type: 3}
+  - {fileID: -4966213957662602761, guid: 0428bc847ad11f944b966150ee0ba533, type: 3}
   radfoamShader: {fileID: 7200000, guid: fefb2cff6d65ebd46b93b420fa00d7b4, type: 3}
   closestShader: {fileID: 7200000, guid: 4f5418d792f39974f8f25d240f960f57, type: 3}
 --- !u!1 &617752956
