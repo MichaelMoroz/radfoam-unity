@@ -6,6 +6,12 @@ Shader "Custom/RadFoamShader"
         _positions_tex ("Positions Texture", 2D) = "white" {}
         _adjacency_diff_tex ("Adjacency Diff Texture", 2D) = "white" {}
         _adjacency_tex ("Adjacency Texture", 2D) = "white" {}
+
+        _TransmittanceThreshold ("Transmittance Threshold", Range(0, 1)) = 0.05
+
+        _BBoxPos ("Bounding Box Position", Vector) = (0, 0, 0, 0)
+        _BBoxSize ("Bounding Box Size", Vector) = (1, 1, 1, 0)
+        _BBoxRotation ("Bounding Box Rotation", Vector) = (0, 0, 0, 1)
     }
     SubShader
 	{
@@ -53,6 +59,11 @@ Shader "Custom/RadFoamShader"
 
             Texture2D<float4> _adjacency_diff_tex; 
             Texture2D<float> _adjacency_tex;
+
+            float _TransmittanceThreshold;
+            float4 _BBoxPos;
+            float4 _BBoxSize;
+            float4 _BBoxRotation;
             
             #define WIDTH_BITS 12
             #define WIDTH 4096
@@ -130,9 +141,9 @@ Shader "Custom/RadFoamShader"
             }
 
             //Traverse the adjacency graph to find the nearest cell (finds nearest cell to given position in N^(1/3) time, where N is the number of cells)
-            uint FindNearestCell(float3 pos) 
+            uint FindNearestCell(float3 pos, uint initial_guess)
             {
-                uint cell = 100;
+                uint cell = initial_guess;
                 float closest_distance = 1e10;
                 for (uint i = 0; i < 1024; i++) {
                     float4 cell_data = positions_buff(cell);
@@ -161,6 +172,53 @@ Shader "Custom/RadFoamShader"
                 return cell;
             }
 
+            // rotate v by unit quaternion q
+            float3 qRotate(float3 v, float4 q)
+            {
+                float3 t = 2.0 * cross(q.xyz, v);
+                return v + q.w * t + cross(q.xyz, t);
+            }
+
+            float4 eulerToQuat(float3 euler)
+            {
+                float c1 = cos(euler.x * 0.5);
+                float c2 = cos(euler.y * 0.5);
+                float c3 = cos(euler.z * 0.5);
+                float s1 = sin(euler.x * 0.5);
+                float s2 = sin(euler.y * 0.5);
+                float s3 = sin(euler.z * 0.5);
+
+                return float4(s1 * c2 * c3 - c1 * s2 * s3,
+                              c1 * s2 * c3 + s1 * c2 * s3,
+                              c1 * c2 * s3 - s1 * s2 * c3,
+                              c1 * c2 * c3 + s1 * s2 * s3);
+            }
+
+            // ray–OBB intersection:  (-1,-1)  if miss
+            float2 IntersectRayBox(
+                float3 rayOrigin, float3 rayDir,
+                float3 boxPos,   float3 boxScale,   float4 boxQuat)
+            {
+                // transform ray into box space  (conjugate == inverse for unit quats)
+                float4 qc      = float4(-boxQuat.xyz, boxQuat.w);
+                float3 oLocal  = qRotate(rayOrigin - boxPos, qc);
+                float3 dLocal  = qRotate(rayDir,           qc);
+
+                // slab test in box space, box extents = ±boxScale
+                float3 invD = 1.0 / dLocal;
+                float3 n    = invD * oLocal;
+                float3 k    = abs(invD) * boxScale;
+
+                float3 t1 = -n - k;
+                float3 t2 = -n + k;
+
+                float tNear = max(max(t1.x, t1.y), t1.z);
+                float tFar  = min(min(t2.x, t2.y), t2.z);
+
+                return (tNear > tFar || tFar < 0.0) ? float2(-1.0, -1.0)
+                                                    : float2(tNear, tFar);
+            }
+
             v2f vert (appdata v)
             {
                 v2f o;
@@ -168,11 +226,11 @@ Shader "Custom/RadFoamShader"
                 UNITY_INITIALIZE_OUTPUT(v2f, o);
                 UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(o);
                 o.pos = float4(float2(1,-1)*(v.uv*2-1),1.0,1);
-                o.start = FindNearestCell(mul(unity_WorldToObject, float4(_WorldSpaceCameraPos, 1)).xyz);
+                o.start = FindNearestCell(mul(unity_WorldToObject, float4(_WorldSpaceCameraPos, 1)).xyz, 123);
                 return o;
             }
 
-            #define CHUNK_SIZE 5
+            #define CHUNK_SIZE 6
             float4 frag(v2f input) : SV_Target
             {
                 UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
@@ -198,31 +256,46 @@ Shader "Custom/RadFoamShader"
                 rayPos = mul(unity_WorldToObject, float4(rayPos, 1)).xyz;
                 rayDir = normalize(mul(unity_WorldToObject, float4(rayDir, 0)).xyz);
                 worldPos = mul(unity_WorldToObject, float4(worldPos, 1)).xyz;
-
-                float max_t = dot(worldPos - rayPos, rayDir);
-           
+                
                 Ray ray;
                 ray.origin = rayPos;
                 ray.direction = rayDir;
 
-                float scene_depth = 10000; 
+                float t_0 = 0.0f;
+                float t_max = dot(worldPos - rayPos, rayDir);
+
+                // Calculate the intersection with the bounding box
+                float2 t = IntersectRayBox(rayPos, rayDir, _BBoxPos.xyz, _BBoxSize.xyz, eulerToQuat(_BBoxRotation.xyz));
+
+                t_0 = max(t.x, t_0);
+                t_max = min(t_max, t.y);
+
+                if (t.y < 0 || t_max <= t_0) {
+                    return float4(0, 0, 0, 0); // No intersection with the volume
+                }
+
                 float3 diffs[CHUNK_SIZE];
 
                 // tracing state
                 uint cell = input.start;
+
+                if(t.x > 0) { // Find new starting point if outside the bounding box
+                    float3 start_pos = ray.origin + ray.direction * t_0;
+                    cell = FindNearestCell(start_pos, cell);
+                }
+
                 float transmittance = 1.0f;
                 float3 color = float3(0, 0, 0);
-                float t_0 = 0.0f;
 
                 int i = 0;
-                for (; i < 200 && transmittance > 0.05; i++) {
+                for (; i < 200 && transmittance > _TransmittanceThreshold; i++) {
                     float4 cell_data = positions_buff(cell);
                     uint adj_from = cell > 0 ? asuint(positions_buff(cell - 1).w) : 0;
                     uint adj_to = asuint(cell_data.w);
 
                     float4 attrs = attrs_buff(cell);
 
-                    float t_1 = scene_depth;
+                    float t_1 = 1e10f;
                     uint next_face = 0xFFFFFFFF; 
 
                     uint faces = adj_to - adj_from;
@@ -245,7 +318,7 @@ Shader "Custom/RadFoamShader"
                         }
                     }
 
-                    t_1 = min(t_1, max_t);
+                    t_1 = min(t_1, t_max);
 
                     float density = attrs.w;
                     float alpha = 1.0 - exp(-density * (t_1 - t_0));
@@ -254,7 +327,7 @@ Shader "Custom/RadFoamShader"
                     color += attrs.rgb * weight;
                     transmittance = transmittance * (1.0 - alpha);
 
-                    if (next_face == 0xFFFFFFFF || t_1 >= max_t) {
+                    if (next_face == 0xFFFFFFFF || t_1 >= t_max) {
                         break;
                     }
 
@@ -262,7 +335,10 @@ Shader "Custom/RadFoamShader"
                     t_0 = t_1;
                 }
 
+                //color = i / 200.0;
+                //transmittance = 0.0;
                 color = pow(color, 2.2f); // Fix color
+                if (transmittance <= _TransmittanceThreshold) transmittance = 0.0;
                 return float4(color, 1.0f - transmittance);
             }
             ENDCG

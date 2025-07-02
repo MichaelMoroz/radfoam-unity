@@ -19,7 +19,6 @@ public class RadFoamAssetBaker : MonoBehaviour
 {
     [Header("Input")]
     public PlyData Data;
-    public Transform Target;
 
     [Header("Settings")]
     [Min(256)] public int textureWidth = 4096;
