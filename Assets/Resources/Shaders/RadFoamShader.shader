@@ -1,33 +1,44 @@
-Shader "Hidden/Custom/RadFoamShader"
+Shader "Custom/RadFoamShader"
 {
     Properties
     {
-        [HideInInspector] _MainTex ("Texture", 2D) = "white" {}
+        _attr_tex ("Attributes Texture", 2D) = "white" {}
+        _positions_tex ("Positions Texture", 2D) = "white" {}
+        _adjacency_diff_tex ("Adjacency Diff Texture", 2D) = "white" {}
+        _adjacency_tex ("Adjacency Texture", 2D) = "white" {}
     }
     SubShader
-    {
-        Cull Off
-		Lighting Off
-		ZWrite Off
-		ZTest Always
+	{
+		Tags { "Queue" = "Overlay" "LightMode" = "Always" "LightMode" = "ForwardBase" }
+		Pass
+		{
+            ZWrite Off
+            ZTest Always
+            Cull Off
+            Blend One OneMinusSrcAlpha
 
-
-        Pass
-        {
             CGPROGRAM
-            #pragma multi_compile_local _ SH_DEGREE_1 SH_DEGREE_2 SH_DEGREE_3 
+            #pragma vertex vert
+			#pragma fragment frag
 
-            #include "UnityCG.cginc"
+			#include "UnityCG.cginc"
+            #include "UnityLightingCommon.cginc"
 
-            struct blit_data
+            struct appdata
             {
                 float4 vertex : POSITION;
                 float2 uv : TEXCOORD0;
-            };
+            #if defined(UNITY_VERTEX_INPUT_INSTANCE_ID)
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+            #endif
+            };       
 
-
-            #pragma vertex blitvert
-            #pragma fragment frag            
+            struct v2f
+			{
+				float4 pos : SV_POSITION;
+                uint start : TEXCOORD0;
+                UNITY_VERTEX_OUTPUT_STEREO
+			};
 
             struct Ray
             {
@@ -35,12 +46,7 @@ Shader "Hidden/Custom/RadFoamShader"
                 float3 direction;
             };
 
-            sampler2D _MainTex;
-            float4 _MainTex_TexelSize;
-
-            float _FisheyeFOV;
-            float4x4 _Camera2WorldMatrix;
-            float4x4 _InverseProjectionMatrix;
+            UNITY_DECLARE_DEPTH_TEXTURE(_CameraDepthTexture);
 
             Texture2D<float4> _attr_tex;
             Texture2D<float4> _positions_tex;
@@ -71,6 +77,59 @@ Shader "Hidden/Custom/RadFoamShader"
                 return _adjacency_diff_tex[index_to_tex_buffer(i)].xyz;
             }
 
+            float4 SVPositionToClipPos(float4 pos)
+            {
+                float4 clipPos = float4(((pos.xy / _ScreenParams.xy) * 2 - 1) * int2(1, -1), pos.z, 1);
+                #ifdef UNITY_SINGLE_PASS_STEREO
+                    clipPos.x -= 2 * unity_StereoEyeIndex;
+                #endif
+                return clipPos;
+            }
+
+            // thanvolumeDensity lyuma & cnlohr for the base of this.
+            // it needed some modifications accounting for flipped projection & mirrors
+            float4 ClipToViewPos(float4 clipPos)
+            {
+                float4 normalizedClipPos = float4(clipPos.xyz / clipPos.w, 1);
+                normalizedClipPos.z = 1 - normalizedClipPos.z;
+                normalizedClipPos.z = normalizedClipPos.z * 2 - 1;
+                float4x4 invP = unity_CameraInvProjection;
+                // do projection flip on this, found empirically
+                invP._24 *= _ProjectionParams.x;
+                // this is needed for mirrors to work properly, found empirically
+                invP._42 *= -1;
+                float4 viewPos = mul(invP, normalizedClipPos);
+                // and the y coord needs to flip for flipped projection, found empirically
+                viewPos.y *= _ProjectionParams.x;
+                return viewPos;
+            }
+
+            // the same as the previous function, but it precalculates all the operations as one matrix
+            float4x4 CreateClipToViewMatrix()
+            {
+                float4x4 flipZ = float4x4(1, 0, 0, 0,
+                                          0, 1, 0, 0,
+                                          0, 0, -1, 1,
+                                          0, 0, 0, 1);
+                float4x4 scaleZ = float4x4(1, 0, 0, 0,
+                                           0, 1, 0, 0,
+                                           0, 0, 2, -1,
+                                           0, 0, 0, 1);
+                float4x4 invP = unity_CameraInvProjection;
+                float4x4 flipY = float4x4(1, 0, 0, 0,
+                                          0, _ProjectionParams.x, 0, 0,
+                                          0, 0, 1, 0,
+                                          0, 0, 0, 1);
+
+                float4x4 result = mul(scaleZ, flipZ);
+                result = mul(invP, result);
+                result = mul(flipY, result);
+                result._24 *= _ProjectionParams.x;
+                result._42 *= -1;
+                return result;
+            }
+
+            //Traverse the adjacency graph to find the nearest cell (finds nearest cell to given position in N^(1/3) time, where N is the number of cells)
             uint FindNearestCell(float3 pos) 
             {
                 uint cell = 100;
@@ -102,57 +161,51 @@ Shader "Hidden/Custom/RadFoamShader"
                 return cell;
             }
 
-            struct blit_v2f
+            v2f vert (appdata v)
             {
-                float4 vertex : SV_POSITION;
-                float2 uv : TEXCOORD0;
-                float2 ray : TEXCOORD1;
-                uint start : TEXCOORD2;
-            };
-
-            blit_v2f blitvert(blit_data v)
-            {
-                blit_v2f o;
-                o.vertex = UnityObjectToClipPos(v.vertex);
-                o.uv = v.uv;
-                o.ray = v.uv * 2 - 1;
-                o.ray.x *= _MainTex_TexelSize.z / _MainTex_TexelSize.w;
-                float3 origin = mul(_Camera2WorldMatrix, float4(0,0,0,1)).xyz;
-                o.start = FindNearestCell(origin);
-                return o;
-            }
-
-            static const float PI = 3.14159265f;
-            Ray GetCameraRayFisheye(float2 uv, float fov)
-            {
-                Ray o;
-                o.origin       = mul(_Camera2WorldMatrix, float4(0,0,0,1)).xyz;
-
-                float theta = atan2(uv.y, uv.x);
-                float phi = sqrt(dot(uv, uv)) * fov * (1.0 / 360.0) * 2 * PI;
-                float3 local_dir = sin(phi) * cos(theta) * float3(1, 0, 0) 
-                                 + sin(phi) * sin(theta) * float3(0, 1, 0) 
-                                 + cos(phi) *  float3(0, 0, -1);
-                o.direction = mul(_Camera2WorldMatrix, float4(local_dir, 0)).xyz;
-                if (phi >= PI) {
-                    o.direction = (float3)0;
-                }
+                v2f o;
+                UNITY_SETUP_INSTANCE_ID(v);
+                UNITY_INITIALIZE_OUTPUT(v2f, o);
+                UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(o);
+                o.pos = float4(float2(1,-1)*(v.uv*2-1),1.0,1);
+                o.start = FindNearestCell(mul(unity_WorldToObject, float4(_WorldSpaceCameraPos, 1)).xyz);
                 return o;
             }
 
             #define CHUNK_SIZE 5
-
-            fixed4 frag (blit_v2f input) : SV_Target
+            float4 frag(v2f input) : SV_Target
             {
-                float4 src_color = tex2D(_MainTex, input.uv);
-                Ray ray = GetCameraRayFisheye(input.ray, _FisheyeFOV);
-                if (dot(ray.direction, ray.direction) == 0) {
-                    return src_color; // fisheye fov too large
-                }
-                ray.direction = normalize(ray.direction);
+                UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
+
+                // get the clip position and sample the depth texture
+                float4 clipPos = SVPositionToClipPos(input.pos);
+                float4 uv = ComputeScreenPos(clipPos);
+                float depth = SAMPLE_DEPTH_TEXTURE(_CameraDepthTexture, uv.xy / uv.w);
+
+                float4x4 invP = CreateClipToViewMatrix();
+                // construct the clip space position from SV_Position & the depth texture
+                // then simply multiply it by the inverse projection matrix
+                float4 viewPos = mul(invP, float4(clipPos.xy / clipPos.w, depth, 1));
+                // don't forget to do the perspective divide
+                viewPos = float4(viewPos.xyz / viewPos.w, 1);
+                // there you go, world space position is just one more matrix multiplication away
+                float3 worldPos = mul(UNITY_MATRIX_I_V, viewPos).xyz;
+
+                float3 rayPos = _WorldSpaceCameraPos;
+                float3 rayDir = worldPos - rayPos;
+
+                // Transform to model space
+                rayPos = mul(unity_WorldToObject, float4(rayPos, 1)).xyz;
+                rayDir = normalize(mul(unity_WorldToObject, float4(rayDir, 0)).xyz);
+                worldPos = mul(unity_WorldToObject, float4(worldPos, 1)).xyz;
+
+                float max_t = dot(worldPos - rayPos, rayDir);
+           
+                Ray ray;
+                ray.origin = rayPos;
+                ray.direction = rayDir;
 
                 float scene_depth = 10000; 
-
                 float3 diffs[CHUNK_SIZE];
 
                 // tracing state
@@ -192,6 +245,8 @@ Shader "Hidden/Custom/RadFoamShader"
                         }
                     }
 
+                    t_1 = min(t_1, max_t);
+
                     float density = attrs.w;
                     float alpha = 1.0 - exp(-density * (t_1 - t_0));
                     float weight = transmittance * alpha;
@@ -199,7 +254,7 @@ Shader "Hidden/Custom/RadFoamShader"
                     color += attrs.rgb * weight;
                     transmittance = transmittance * (1.0 - alpha);
 
-                    if (next_face == 0xFFFFFFFF) {
+                    if (next_face == 0xFFFFFFFF || t_1 >= max_t) {
                         break;
                     }
 
@@ -208,7 +263,7 @@ Shader "Hidden/Custom/RadFoamShader"
                 }
 
                 color = pow(color, 2.2f); // Fix color
-                return float4(lerp(color, src_color.xyz, transmittance), 1);
+                return float4(color, 1.0f - transmittance);
             }
             ENDCG
         }
