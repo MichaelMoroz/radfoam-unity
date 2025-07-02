@@ -127,15 +127,6 @@ public class RadFoamWebGL : MonoBehaviour
         var world_to_model = Matrix4x4.Scale(new Vector3(1, -1, 1)) * Target.worldToLocalMatrix;
 
         {
-            // TODO: we could use some acceleration structure for finding the closest cell.. 
-            // but it's a few million points, a linear search should not be the bottleneck here (+the added memory for the acceleration structure)
-            var local_camera_pos = world_to_model.MultiplyPoint3x4(camera.transform.position);
-            using var closest = new NativeArray<uint>(1, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-            new FindClosest() { target = local_camera_pos, positions = points, closest = closest }.Schedule().Complete();
-            blitMat.SetInt("_start_index", (int)closest[0]);
-        }
-
-        {
             blitMat.SetMatrix("_Camera2WorldMatrix", world_to_model * camera.cameraToWorldMatrix);
             blitMat.SetMatrix("_InverseProjectionMatrix", camera.projectionMatrix.inverse);
             blitMat.SetFloat("_FisheyeFOV", fisheye_fov);
@@ -226,29 +217,6 @@ public class RadFoamWebGL : MonoBehaviour
 
                 adjacency_diff[a] = math.half4(new float4(adj_diff, 0));
             }
-        }
-    }
-
-    [BurstCompile]
-    public struct FindClosest : IJob
-    {
-        public float3 target;
-        [ReadOnly] public NativeArray<float4> positions;
-        [WriteOnly] public NativeArray<uint> closest;
-
-        public void Execute()
-        {
-            var closest_dist = float.MaxValue;
-            var closest_index = 0;
-            for (var i = 0; i < positions.Length; i++) {
-                float4 cell_data = positions[i];
-                var dist = math.distancesq(cell_data.xyz, target);
-                if (dist < closest_dist) {
-                    closest_dist = dist;
-                    closest_index = i;
-                }
-            }
-            closest[0] = (uint)closest_index;
         }
     }
 }

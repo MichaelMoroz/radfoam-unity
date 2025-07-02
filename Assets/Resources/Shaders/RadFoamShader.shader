@@ -25,12 +25,6 @@ Shader "Hidden/Custom/RadFoamShader"
                 float2 uv : TEXCOORD0;
             };
 
-            struct blit_v2f
-            {
-                float4 vertex : SV_POSITION;
-                float2 uv : TEXCOORD0;
-                float2 ray : TEXCOORD1;
-            };
 
             #pragma vertex blitvert
             #pragma fragment frag            
@@ -47,42 +41,13 @@ Shader "Hidden/Custom/RadFoamShader"
             float _FisheyeFOV;
             float4x4 _Camera2WorldMatrix;
             float4x4 _InverseProjectionMatrix;
-            uint _start_index;
 
             Texture2D<float4> _attr_tex;
             Texture2D<float4> _positions_tex;
 
             Texture2D<float4> _adjacency_diff_tex; 
             Texture2D<float> _adjacency_tex;
-
-            blit_v2f blitvert(blit_data v)
-            {
-                blit_v2f o;
-                o.vertex = UnityObjectToClipPos(v.vertex);
-                o.uv = v.uv;
-                o.ray = v.uv * 2 - 1;
-                o.ray.x *= _MainTex_TexelSize.z / _MainTex_TexelSize.w;
-                return o;
-            }
-
-            static const float PI = 3.14159265f;
-            Ray GetCameraRayFisheye(float2 uv, float fov)
-            {
-                Ray o;
-                o.origin       = mul(_Camera2WorldMatrix, float4(0,0,0,1)).xyz;
-
-                float theta = atan2(uv.y, uv.x);
-                float phi = sqrt(dot(uv, uv)) * fov * (1.0 / 360.0) * 2 * PI;
-                float3 local_dir = sin(phi) * cos(theta) * float3(1, 0, 0) 
-                                 + sin(phi) * sin(theta) * float3(0, 1, 0) 
-                                 + cos(phi) *  float3(0, 0, -1);
-                o.direction = mul(_Camera2WorldMatrix, float4(local_dir, 0)).xyz;
-                if (phi >= PI) {
-                    o.direction = (float3)0;
-                }
-                return o;
-            }
-
+            
             #define WIDTH_BITS 12
             #define WIDTH 4096
 
@@ -106,6 +71,75 @@ Shader "Hidden/Custom/RadFoamShader"
                 return _adjacency_diff_tex[index_to_tex_buffer(i)].xyz;
             }
 
+            uint FindNearestCell(float3 pos) 
+            {
+                uint cell = 100;
+                float closest_distance = 1e10;
+                for (uint i = 0; i < 1024; i++) {
+                    float4 cell_data = positions_buff(cell);
+                    float3 cell_pos = cell_data.xyz;
+
+                    uint next_face = 0xFFFFFFFF; 
+                    uint adj_from = cell > 0 ? asuint(positions_buff(cell - 1).w) : 0;
+                    uint adj_to = asuint(cell_data.w);
+                    for (uint f = adj_from; f < adj_to; f++) {
+                        half3 diff = adjacency_diff_buffer(f).xyz;
+                        float3 adj_pos = cell_pos + diff;
+                        float dist = distance(pos, adj_pos);
+                        if(dist < closest_distance)
+                        {
+                            next_face = f;
+                            closest_distance = dist;
+                        }
+                    }
+
+                    if (next_face == 0xFFFFFFFF) {
+                        break;
+                    }
+
+                    cell = adjacency_buffer(next_face);
+                }
+                return cell;
+            }
+
+            struct blit_v2f
+            {
+                float4 vertex : SV_POSITION;
+                float2 uv : TEXCOORD0;
+                float2 ray : TEXCOORD1;
+                uint start : TEXCOORD2;
+            };
+
+            blit_v2f blitvert(blit_data v)
+            {
+                blit_v2f o;
+                o.vertex = UnityObjectToClipPos(v.vertex);
+                o.uv = v.uv;
+                o.ray = v.uv * 2 - 1;
+                o.ray.x *= _MainTex_TexelSize.z / _MainTex_TexelSize.w;
+                float3 origin = mul(_Camera2WorldMatrix, float4(0,0,0,1)).xyz;
+                o.start = FindNearestCell(origin);
+                return o;
+            }
+
+            static const float PI = 3.14159265f;
+            Ray GetCameraRayFisheye(float2 uv, float fov)
+            {
+                Ray o;
+                o.origin       = mul(_Camera2WorldMatrix, float4(0,0,0,1)).xyz;
+
+                float theta = atan2(uv.y, uv.x);
+                float phi = sqrt(dot(uv, uv)) * fov * (1.0 / 360.0) * 2 * PI;
+                float3 local_dir = sin(phi) * cos(theta) * float3(1, 0, 0) 
+                                 + sin(phi) * sin(theta) * float3(0, 1, 0) 
+                                 + cos(phi) *  float3(0, 0, -1);
+                o.direction = mul(_Camera2WorldMatrix, float4(local_dir, 0)).xyz;
+                if (phi >= PI) {
+                    o.direction = (float3)0;
+                }
+                return o;
+            }
+
             #define CHUNK_SIZE 5
 
             fixed4 frag (blit_v2f input) : SV_Target
@@ -122,7 +156,7 @@ Shader "Hidden/Custom/RadFoamShader"
                 float3 diffs[CHUNK_SIZE];
 
                 // tracing state
-                uint cell = _start_index;
+                uint cell = input.start;
                 float transmittance = 1.0f;
                 float3 color = float3(0, 0, 0);
                 float t_0 = 0.0f;
