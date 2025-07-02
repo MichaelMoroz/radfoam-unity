@@ -12,7 +12,7 @@ Visualization of point indices with Morton reordering enabled.
 
 - compute shader based renderer
   - morton reordering of voronoi cells
-- (very) limited WebGL renderer
+- standalone shader rendering mode (works in VRChat)
 - optimized `.ply` loader (`binary_little_endian`)
 
 ## Model Data
